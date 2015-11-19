@@ -4,7 +4,11 @@ library(xgboost)
 library(caret)
 library(pROC)
 
-#my favorite seed^^
+split.df <- function(df, ratio) {
+  h = createDataPartition(df$QuoteConversion_Flag, p = ratio, list = FALSE, times = 1)
+  list(part1 = df[h, ], part2 = df[-h, ])
+}
+
 set.seed(88888)
 
 cat("reading the train and test data\n")
