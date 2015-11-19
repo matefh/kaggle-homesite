@@ -61,26 +61,31 @@ names(train.full)
 cat("test data column names after slight feature engineering\n")
 names(test.full)
 
-# set.seed(9)
-# train <- train[sample(nrow(train), 5000),]
-gc()
+#### prepare for training ####
 
-tra<-train[,feature.names]
-# tra<-tra[,c(1:50,65:105,110:165,180:230,245:290)]
-dim(tra)
-dim(test)
+set.seed(9)
 
-nrow(train)
-h<-sample(nrow(train),2000)
+train = train.full
 
+train.mini = split.df(train, 0.3)$part1
+train.mini.split = split.df(train.mini, 0.8)
+train.mini.t = train.mini.split$part1
+train.mini.v = train.mini.split$part2
 
+train.split = split.df(train, 0.8)
+train.t = train.split$part1
+train.v = train.split$part2
 
-dval<-xgb.DMatrix(data=data.matrix(tra[h,]),label=train$QuoteConversion_Flag[h])
-dtrain<-xgb.DMatrix(data=data.matrix(tra[-h,]),label=train$QuoteConversion_Flag[-h])
-# dtrain<-xgb.DMatrix(data=data.matrix(tra[,]),label=train$QuoteConversion_Flag)
+train.on.v = train.v
+train.on.t = train.t
+# train.on.v = train.mini.v
+# train.on.t = train.mini.t
 
-watchlist<-list(val=dval,train=dtrain)
-param <- list(  objective           = "binary:logistic", 
+dval   = xgb.DMatrix(data=data.matrix(train.on.v[, feature.names]),label=train.on.v$QuoteConversion_Flag)
+dtrain = xgb.DMatrix(data=data.matrix(train.on.t[, feature.names]),label=train.on.t$QuoteConversion_Flag)
+
+watchlist = list(val=dval,train=dtrain)
+param = list(  objective           = "binary:logistic", 
                 booster = "gbtree",
                 eval_metric = "auc",
                 eta                 = 0.02, # 0.06, #0.01,
@@ -92,23 +97,27 @@ param <- list(  objective           = "binary:logistic",
                 # lambda = 1
 )
 
-clf <- xgb.train(   params              = param, 
+nrounds = 2000
+early = round(nrounds / 5)
+model = xgb.train(  params              = param, 
                     data                = dtrain, 
-                    nrounds             = 10, #1800, 
+                    nrounds             = nrounds,
                     verbose             = 0,  #1
-                    #early.stop.round    = 150,
+                    early.stop.round    = early,
                     watchlist           = watchlist,
-                    maximize            = FALSE
+                    maximize            = TRUE
 )
 
-val_pred = predict(clf, data.matrix(tra[h, ]))
-auc(train[h, ]$QuoteConversion_Flag, val_pred)
+val_pred = predict(model, data.matrix(train.on.v[, feature.names]), ntreelimit = model$bestInd)
+auc(train.on.v$QuoteConversion_Flag, val_pred)
 
-test1<-test[,feature.names]
-dim(test)
-# test1<-test1[,c(1:50,65:105,110:165,180:230,245:290)]
+test1<-test.full[,feature.names]
+# test1<-test1[,c(1:50)]
 
-pred1 <- predict(clf, data.matrix(test1))
-submission <- data.frame(QuoteNumber=test$QuoteNumber, QuoteConversion_Flag=pred1)
+pred1 <- predict(model, data.matrix(test1), ntreelimit = model$bestInd)
+submission <- data.frame(QuoteNumber=test.full$QuoteNumber, QuoteConversion_Flag=pred1)
+
 cat("saving the submission file\n")
-write_csv(submission, "output/xgb_stop_1800_10.csv")
+exp_name = paste(sep = "", early, "_", nrounds, "_", param$max_depth, "")
+write_csv(submission, paste("output/", exp_name, ".csv", sep = ""))
+xgb.save(model, paste("models/", exp_name, ".xgb", sep = ""))
