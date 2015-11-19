@@ -79,7 +79,7 @@ param = list(  objective           = "binary:logistic",
                 booster = "gbtree",
                 eval_metric = "auc",
                 eta                 = 0.02, # 0.06, #0.01,
-                max_depth           = 10, #changed from default of 8
+                max_depth           = 16, #changed from default of 8
                 subsample           = 0.85, # 0.7
                 colsample_bytree    = 0.66 # 0.7
                 #num_parallel_tree   = 2
