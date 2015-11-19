@@ -12,8 +12,8 @@ split.df <- function(df, ratio) {
 set.seed(88888)
 
 cat("reading the train and test data\n")
-train <- read_csv("./input/train.csv")
-test  <- read_csv("./input/test.csv")
+train.full <- read_csv("./input/train.csv")
+test.full  <- read_csv("./input/test.csv")
 
 # There are some NAs in the integer columns so conversion to zero
 train[is.na(train)]   <- 0
@@ -30,38 +30,36 @@ summary(test)
 
 
 # seperating out the elements of the date column for the train set
-train$month <- as.integer(format(train$Original_Quote_Date, "%m"))
-train$year <- as.integer(format(train$Original_Quote_Date, "%y"))
-train$day <- weekdays(as.Date(train$Original_Quote_Date))
+train.full$month <- as.integer(format(train.full$Original_Quote_Date, "%m"))
+train.full$year <- as.integer(format(train.full$Original_Quote_Date, "%y"))
+train.full$day <- weekdays(as.Date(train.full$Original_Quote_Date))
 
 # removing the date column
-train <- train[,-c(2)]
+train.full <- train.full[,-c(2)]
 
-# seperating out the elements of the date column for the train set
-test$month <- as.integer(format(test$Original_Quote_Date, "%m"))
-test$year <- as.integer(format(test$Original_Quote_Date, "%y"))
-test$day <- weekdays(as.Date(test$Original_Quote_Date))
+# seperating out the elements of the date column for the test set
+test.full$month <- as.integer(format(test.full$Original_Quote_Date, "%m"))
+test.full$year <- as.integer(format(test.full$Original_Quote_Date, "%y"))
+test.full$day <- weekdays(as.Date(test.full$Original_Quote_Date))
 
 # removing the date column
-test <- test[,-c(2)]
+test.full <- test.full[,-c(2)]
 
-feature.names <- names(train)[c(3:301)]
-cat("Feature Names\n")
-feature.names
+feature.names <- names(train.full)[c(3:301)]
 
 cat("assuming text variables are categorical & replacing them with numeric ids\n")
 for (f in feature.names) {
-  if (class(train[[f]])=="character") {
-    levels <- unique(c(train[[f]], test[[f]]))
-    train[[f]] <- as.integer(factor(train[[f]], levels=levels))
-    test[[f]]  <- as.integer(factor(test[[f]],  levels=levels))
+  if (class(train.full[[f]])=="character") {
+    levels <- unique(c(train.full[[f]], test.full[[f]]))
+    train.full[[f]] <- as.integer(factor(train.full[[f]], levels=levels))
+    test.full[[f]]  <- as.integer(factor(test.full[[f]],  levels=levels))
   }
 }
 
 cat("train data column names after slight feature engineering\n")
-names(train)
+names(train.full)
 cat("test data column names after slight feature engineering\n")
-names(test)
+names(test.full)
 
 # set.seed(9)
 # train <- train[sample(nrow(train), 5000),]
