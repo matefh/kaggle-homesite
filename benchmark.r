@@ -16,18 +16,8 @@ train.full <- read_csv("./input/train.csv")
 test.full  <- read_csv("./input/test.csv")
 
 # There are some NAs in the integer columns so conversion to zero
-train[is.na(train)]   <- 0
-test[is.na(test)]   <- 0
-
-cat("train data column names and details\n")
-names(train)
-str(train)
-summary(train)
-cat("test data column names and details\n")
-names(test)
-str(test)
-summary(test)
-
+train.full[is.na(train.full)]   <- -1
+test.full[is.na(test.full)]   <- -1
 
 # seperating out the elements of the date column for the train set
 train.full$month <- as.integer(format(train.full$Original_Quote_Date, "%m"))
