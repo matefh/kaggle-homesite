@@ -57,12 +57,14 @@ set.seed(9)
 
 train = train.full
 
+train.rows.percent = 0.99
+
 train.mini = split.df(train, 0.3)$part1
-train.mini.split = split.df(train.mini, 0.8)
+train.mini.split = split.df(train.mini, train.rows.percent)
 train.mini.t = train.mini.split$part1
 train.mini.v = train.mini.split$part2
 
-train.split = split.df(train, 0.8)
+train.split = split.df(train, train.rows.percent)
 train.t = train.split$part1
 train.v = train.split$part2
 
@@ -74,21 +76,26 @@ train.on.t = train.t
 dval   = xgb.DMatrix(data=data.matrix(train.on.v[, feature.names]),label=train.on.v$QuoteConversion_Flag)
 dtrain = xgb.DMatrix(data=data.matrix(train.on.t[, feature.names]),label=train.on.t$QuoteConversion_Flag)
 
-watchlist = list(val=dval,train=dtrain)
+watchlist = list()
+if (nrow(dval) > 0)
+  watchlist$val = dval
+watchlist$train = dtrain
+
 param = list(  objective           = "binary:logistic", 
                 booster = "gbtree",
                 eval_metric = "auc",
-                eta                 = 0.02, # 0.06, #0.01,
-                max_depth           = 16, #changed from default of 8
+                max_depth           = 8, #changed from default of 8
+                eta                 = 0.01, # 0.0025, 0.006, 0.01, 0.015, 0.02, 0.06
                 subsample           = 0.85, # 0.7
-                colsample_bytree    = 0.66 # 0.7
+                colsample_bytree    = 0.7 # 0.7
                 #num_parallel_tree   = 2
                 # alpha = 0.0001, 
                 # lambda = 1
 )
 
-nrounds = 2000
+nrounds = 3000
 early = round(nrounds / 5)
+
 model = xgb.train(  params              = param, 
                     data                = dtrain, 
                     nrounds             = nrounds,
@@ -108,6 +115,7 @@ pred1 <- predict(model, data.matrix(test1), ntreelimit = model$bestInd)
 submission <- data.frame(QuoteNumber=test.full$QuoteNumber, QuoteConversion_Flag=pred1)
 
 cat("saving the submission file\n")
-exp_name = paste(sep = "", early, "_", nrounds, "_", param$max_depth, "")
+exp_name = paste(sep = "", train.rows.percent, "_", early, "_", nrounds, "_", 
+                 param$max_depth, "_", param$eta, "_", param$subsample, "_", param$colsample_bytree, "")
 write_csv(submission, paste("output/", exp_name, ".csv", sep = ""))
 xgb.save(model, paste("models/", exp_name, ".xgb", sep = ""))
