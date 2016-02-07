@@ -723,31 +723,79 @@ for(with_golden_features in c(0))
     }
     # }
     
-    model = xgb.train(  params              = param, 
-                        data                = dtrain, 
-                        nrounds             = nrounds,
-                        verbose             = 1,  #1
-                        # early.stop.round    = early,
-                        watchlist           = watchlist,
-                        maximize            = TRUE,
-                        print.every.n       = 100
-    )
-    val_pred = predict(model, data.matrix(train.on.both[h, feature.names]), ntreelimit = model$bestInd)
-    # score = as.numeric(auc(train.on.both[h, ]$QuoteConversion_Flag, val_pred))
-    # cat(exp_name, "\nTraining score:", score, "\n")
-    test1 <- test.full[,feature.names]
-    pred1 <- predict(model, data.matrix(test1), ntreelimit = model$bestInd)
-    submission <- data.frame(QuoteNumber=test.full$QuoteNumber, QuoteConversion_Flag=pred1)
-    
-    # cat("saving the submission file\n")
-    write_csv(submission, paste0("output/", exp_name, ".csv"))
-    saveRDS(train.on.t, paste0("calibration/train_", exp_name, ".rds"))
-    saveRDS(train.on.v, paste0("calibration/val_", exp_name, ".rds"))
-    save(feature.names, file = paste0("models/feature_names_", exp_name))
-    xgb.save(model, paste0("models/", exp_name, ".xgb"))
-    cat("Training Done.", exp_name, "\n")
-    gc()
-    
-    # cat("Time: ", Sys.time() - time_before_training, "\n")
-  }
+    #### Train the model ####
+    if (run_train == 1) {
+	    set.seed(seed_value)
+      exp_name = paste0(exp_name, model_name, paste0("_seed", seed_value))
+  	  if (model_name == 'xgb') {
+  	    time_before_training = Sys.time()
+  	    gc()
+  	    
+  	    model = xgb.train(  params              = param, 
+  				data                = dtrain, 
+  				nrounds             = nrounds,
+  				verbose             = 1,  #1
+  				early.stop.round    = early,
+  				watchlist           = watchlist,
+  				maximize            = TRUE,
+  				print.every.n       = 100
+  	    )
+  	    val_pred = predict(model, data.matrix(train.on.v[, feature.names]), ntreelimit = model$bestInd)
+  	    score = as.numeric(auc(train.on.v[, ]$QuoteConversion_Flag, val_pred))
+  	    cat(exp_name, "\nTraining score:", score, "(", model$bestInd, ")", "\n")
+  	    test1 <- test.full[,feature.names]
+  	    pred1 <- predict(model, data.matrix(test1), ntreelimit = model$bestInd)
+  	    test.full[[id_name]] = as.character(as.numeric(test.full[[id_name]]))
+  	    submission <- data.frame(QuoteNumber=test.full$QuoteNumber, QuoteConversion_Flag=pred1)
+  	    
+  	    # cat("saving the submission file\n")
+  	    write_csv(submission, paste0("output/", exp_name, ".csv"))
+  	    #     saveRDS(train.on.t, paste0("calibration/train_", exp_name, ".rds"))
+  	    #     saveRDS(train.on.v, paste0("calibration/val_", exp_name, ".rds"))
+  	    save(feature.names, file = paste0("models/feature_names_", exp_name))
+  	    xgb.save(model, paste0("models/", exp_name, ".xgb"))
+  	    cat("Training Done.", exp_name, "\n")
+  	    gc()
+  	    
+  	    # cat("Time: ", Sys.time() - time_before_training, "\n")
+  	  } else if (model_name == 'nn') {
+  	    nnetGrid <- expand.grid(.size = 1:10, .decay = c(0, .1, 1, 2))
+  	    maxSize <- max(nnetGrid$.size)
+  	    fs = feature.names
+  	    fs = c("PropertyField37", "SalesField5", "PersonalField9", "PropertyField29", "SalesField4", "PersonalField2")
+  	    numWts <- 1*(maxSize * (length(fs) + 1) + maxSize + 1)
+  	    train.full$QuoteConversion_Flag = train.backup$QuoteConversion_Flag
+  	    train.full$QuoteConversion_Flag[train.full$QuoteConversion_Flag == 0] = "no"
+  	    train.full$QuoteConversion_Flag[train.full$QuoteConversion_Flag == 1] = "yes"
+  	    
+  	    nnetFit = train(x = train.full[, fs],
+                        y = factor(train.full$QuoteConversion_Flag, levels = c("no", "yes")),
+                        method = "nnet",
+                        metric = "AUC",
+                        tuneGrid = nnetGrid[1:1, ],
+                        trace = T,
+                        maxit = 10,
+                        MaxNWts = numWts,
+  	                    trControl = trainControl(classProbs = T, allowParallel = T, summaryFunction = twoClassSummary))
+  	    nnetFit
+  	    
+  	    d = cbind(train.full[, fs], class.ind(train.full$QuoteConversion_Flag))
+  	    form = as.formula(paste("yes + no ~", paste(fs, collapse = " + ")))
+  	    nnetMod = neuralnet(data = d,
+  	                        form, 
+  	                        hidden = c(3, 4, 5),
+  	                        act.fct = "logistic")
+  	    
+  	    scores <- compute(nnetMod, d[, 1:5])$net.result
+  	    as.numeric(auc(train.full$QuoteConversion_Flag, scores[, 1]))
+  	    
+  	    res = predict(nnetMod, newdata = test.full)
+  	    head(res)
+  	  }
+    }
+  })
 }
+
+# try both validation set
+# choose one
+# layer size(s)
