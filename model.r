@@ -1,5 +1,5 @@
-cv_states = c(0)
 stop_before_cv_train = 0
+cv_states = c(1)
 
 #### libraries ####
 if (!("readr" %in% installed.packages())) {
@@ -11,11 +11,13 @@ if (!("readr" %in% installed.packages())) {
 library(readr)
 library(xgboost)
 library(caret)
-# library(pROC)
+library(pROC)
 library(tidyr)
 library(dplyr)
 library(lazyeval)
 library(e1071)
+library(neuralnet)
+library(nnet)
 #### functions ####
 split.df <- function(df, ratio) {
   h = createDataPartition(df$QuoteConversion_Flag, p = ratio, list = FALSE, times = 1)
@@ -48,7 +50,6 @@ add.date.features <- function(df, date.cols) {
   }
   df
 }
-add.date.features(train.full, c("Original_Quote_Date"))
 
 map.missing <- function(df, to.replace = "na", threshold = 10, impute_method = "mean") {
   names = names(df)
@@ -89,6 +90,24 @@ count_per_row <- function(df, val) {
     rowSums(df == val)
   }
 }
+replace_transformed <- function(tr_name, df, tr, features) {
+  colnames(tr) = paste0(tr_name, "_", features)
+  cbind(df[, !names(df) %in% features], tr)
+}
+add_transformed <- function(tr_name, df, tr, features) {
+  colnames(tr) = paste0(tr_name, "_", features)
+  cbind(df, tr)
+}
+create_features <- function(df, df2, feature_names) {
+  names(df2) = feature_names
+  cbind(df, df2)
+}
+to_char <- function(df) {
+  for (f in names(df))
+    df[[f]] = as.character(df[[f]])
+  df
+}
+
 #### reading data ####
 gc()
 set.seed(88888)
@@ -102,9 +121,6 @@ target_name = "QuoteConversion_Flag"
 id_col = train.backup[[id_name]]
 target_col = train.backup[[target_name]]
 id_col_test = test.backup[[id_name]]
-
-
-#### initializing vars ####
 # load(file = "models/imp_auc_260753_1800_7_0.02_0.82_0.66_")
 # groups = 5
 # featgroup = 4
@@ -113,34 +129,51 @@ id_col_test = test.backup[[id_name]]
 train_with_features = c()#imp[seq(0, nrow(imp) - 1) %% groups == featgroup]$Feature
 # train_with_features = imp$Feature
 
+# corr vars
+# save input auc_260753_1800_7_0.02_0.82_0.66_csbc_lg_sqrt_numr2_missingcounts2_dummies_datedummies_lg_sqrt_imp_golden_features_keep_cols_most_corr_target_0.15_0.3_1139.csv
+
+#### initializing vars ####
+# 0.83, 0.88
+search_grid = expand.grid(subsample = c( 0.76, 0.81 ), colsample_bytree = c(0.6, 0.65, 0.67, 0.72), max_depth = c(7, 6, 8, 5, 9))
+
+
 for(run_cv in cv_states)
-for(with_missing_counts in c(0))
-for(with_transform_csbc in c(0))
+for(keep_cols in c(1))
+for(with_corr_features in c(0))
+for(with_missing_counts in c(0)) # 0 or 2 but not 1
+for(with_transform_csbc in c(0)) # 0 or 2 but not 1
 for(with_logs_sqrt_all in c(0))
 for(with_dummyvars in c(0))
 for(with_date_dummies in c(0))
 for(with_date_split in c(0))
+for(with_value_counts in c(0))
 for(with_cat_target in c(0))
-for(with_csbc in c(0))
+for(with_csbc in c(0)) # keep 0
 for(with_logs_sqrts_imp in c(0))
 for(with_lindep in c(0))
-for(with_value_counts in c(0))
+for(with_most_corr_target in c(0))
+for(with_golden_features in c(0))
 {
-#   var_list = c(with_missing_counts, with_dummyvars, with_date_dummies, with_date_split)
-#   var_sum = sum(var_list)
-#   if (var_sum != 1 & (var_sum != 2 | with_missing_counts != 2)) next
-  nrounds = 10#ifelse(run_cv, 1800, 1800)
+  nrounds = ifelse(run_cv, 1400, 1800)
   harcoded_remove = c()
-  full_data = 1# - run_cv
+  full_data = 0# - run_cv # keep it 1 due to issue with split.df and value_counts
   train.rows.percent = 0.9
   train_with_all = 1
-  load_data = 0
+  save_data = 1
+  load_data = save_data
   run_train = 1 - run_cv
-
+  seed_value = 36 # 819 98253   516    36   925    28     7     2   580 62929, 110389
+  
+  model_name = 'xgb'
+  corr_iterations = 1
+  highest_corr_threshold = 0.15
+  final_corr_threshold = 0.30
+  corr_features_count = 50
+  
   exp_list = c(
-    "week",
     ifelse(with_transform_csbc, paste0("csbc_lg_sqrt_numr", with_transform_csbc), ""),
     ifelse(with_missing_counts, paste0("missingcounts", with_missing_counts), ""),
+    ifelse(with_corr_features, paste0("corr_features", corr_features_count), ""),
     ifelse(with_dummyvars, "dummies", ""),
     ifelse(with_date_dummies, "datedummies", ""),
     ifelse(with_date_split, "full_date_split", ""),
@@ -148,21 +181,24 @@ for(with_value_counts in c(0))
     ifelse(with_csbc, paste0("csbc_lg_sqrt_all", with_csbc), ""),
     ifelse(with_logs_sqrts_imp, "lg_sqrt_imp", ""),
     ifelse(with_lindep, "lindep", ""),
-    ifelse(with_value_counts, "value_counts", "")
+    ifelse(with_value_counts, "value_counts", ""),
+    ifelse(with_golden_features, "golden_features", ""),
+    ifelse(keep_cols, "keep_cols", ""),
+    ifelse(with_most_corr_target, paste("most_corr_target", corr_iterations, highest_corr_threshold, final_corr_threshold, sep = "_"), "")
   )
   exp_suffix = paste0(collapse = "_", exp_list[exp_list != ""])
   cat(exp_suffix, "\n")
-
+  
   eval_metric = "auc"
   param_bests = list(
-    eta = 0.02,
+    eta = 0.01,
     max_depth = 7,
-    subsample = 0.82,
-    colsample_bytree = 0.66
-#     eta                 = 0.023, # 0.06, #0.01,
-#     max_depth           = 6, #changed from default of 8
-#     subsample           = 0.83, # 0.7
-#     colsample_bytree    = 0.77 # 0.7
+    subsample = 1,
+    colsample_bytree = 0.6
+    #     eta                 = 0.023, # 0.06, #0.01,
+    #     max_depth           = 6, #changed from default of 8
+    #     subsample           = 0.83, # 0.7
+    #     colsample_bytree    = 0.77 # 0.7
   )
   eval_metric_max = c("auc"=TRUE, "rmse"=FALSE, "error"=FALSE, "logloss"=FALSE)
   gc()
@@ -185,34 +221,39 @@ for(with_value_counts in c(0))
     
     train.full[is.na(train.full)]   <- 100
     test.full[is.na(test.full)]   <- 100
-
-#       if (impute_method != "") {
-#         train.full = map.missing(train.full, to.replace = -1, impute_method = impute_method)
-#         test.full = map.missing(test.full, to.replace = -1, impute_method = impute_method)
-#       }
-
+    
+    #       if (impute_method != "") {
+    #         train.full = map.missing(train.full, to.replace = -1, impute_method = impute_method)
+    #         test.full = map.missing(test.full, to.replace = -1, impute_method = impute_method)
+    #       }
+    
     train.full = add.date.features(train.full, c("Original_Quote_Date"))
-    train.full <- train.full %>% select(-Original_Quote_Date)
+    train.full <- train.full %>% dplyr::select(-Original_Quote_Date)
     
     test.full = add.date.features(test.full, c("Original_Quote_Date"))
-    test.full <- test.full %>% select(-Original_Quote_Date)
+    test.full <- test.full %>% dplyr::select(-Original_Quote_Date)
     
-    neg_tab = sort(sapply(train.backup, function(col) sum(col == -1))) / nrow(train.backup)
-    all_neg_cols = neg_tab[neg_tab > 0.01]
-    neg_cols = names(all_neg_cols[7:length(all_neg_cols)])
-    # neg_cols = c("GeographicField61A", "GeographicField5A", "GeographicField60A", "PropertyField11A", "GeographicField21A", "GeographicField10A")
-    nzv_cols = c("GeographicField10B", "PropertyField20", "PropertyField9", "PersonalField8", "PersonalField69", "PersonalField73", "PersonalField70")
-    zv_cols = c("PropertyField6", "GeographicField10A")
-    # linear_dep = c("PersonalField65", "PersonalField67", "PersonalField80", "PersonalField81", "PersonalField82")
-    to_remove = c()
-    to_remove = c(nzv_cols, zv_cols, harcoded_remove)
-    to_remove = c(neg_cols, to_remove)
-    train.full = train.full[, !(names(train.full) %in% to_remove)]
-    test.full = test.full[, !(names(test.full) %in% to_remove)]
-    
+    if (T) {
+      neg_tab = sort(sapply(train.backup, function(col) sum(col == -1))) / nrow(train.backup)
+      all_neg_cols = neg_tab[neg_tab > 0.01]
+      neg_cols = names(all_neg_cols[7:length(all_neg_cols)])
+      # neg_cols = c("GeographicField61A", "GeographicField5A", "GeographicField60A", "PropertyField11A", "GeographicField21A", "GeographicField10A")
+      nzv_cols = c("GeographicField10B", "PropertyField20", "PropertyField9", "PersonalField8", "PersonalField69", "PersonalField73", "PersonalField70")
+      zv_cols = c("PropertyField6", "GeographicField10A")
+      # linear_dep = c("PersonalField65", "PersonalField67", "PersonalField80", "PersonalField81", "PersonalField82")
+      to_remove = c()
+      if (keep_cols) {
+        to_remove = c(nzv_cols, zv_cols, harcoded_remove)
+        to_remove = c(neg_cols, to_remove)
+        train.full = train.full[, !(names(train.full) %in% to_remove)]
+        test.full = test.full[, !(names(test.full) %in% to_remove)]
+      }
+    }
     
     feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
+    original_feature.names = feature.names
     
+    print(1)
     if (with_missing_counts > 0) {
       train_missing_negones = count_per_row(train.full[, feature.names], -1)
       train_missing_blank = count_per_row(train.full[, feature.names], "")
@@ -289,20 +330,10 @@ for(with_value_counts in c(0))
       }
       feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-    
-    replace_transformed <- function(tr_name, df, tr, features) {
-      colnames(tr) = paste0(tr_name, "_", features)
-      cbind(df[, !names(df) %in% features], tr)
-    }
-    
-    add_transformed <- function(tr_name, df, tr, features) {
-      colnames(tr) = paste0(tr_name, "_", features)
-      cbind(df, tr)
-    }
-    
+    print(2)
     if (with_transform_csbc) {
       numr = names(train.full[, sapply(train.full, is.numeric)])
-      numr_only = numr[sapply(numr, function(f) !substring(f, nchar(f)) %in% c("A", "B"))]
+      numr_only = numr[sapply(numr, function(f) !(substring(f, nchar(f)) %in% c("A", "B", "missing")))]
       numr_only = numr_only[!numr_only %in% c(target_name, id_name)]
       all_data = rbind(train.full[, numr_only], test.full[, numr_only])
       pp_vals = preProcess(all_data, method = c("center", "scale", "BoxCox"))
@@ -327,28 +358,32 @@ for(with_value_counts in c(0))
       train.full[[id_name]] = id_col
       train.full[[target_name]] = target_col
       test.full[[id_name]] = id_col_test
-    }
-    
-    if (with_dummyvars) {
-      train.dummies = dummyVars( ~ ., data = train.full)
-      train.full = data.frame(predict(train.dummies, newdata = train.full))
-      train.full[[id_name]] = id_col
-      train.full[[target_name]] = target_col
-      
-      test.dummies = dummyVars( ~ ., data = test.full)
-      test.full = data.frame(predict(test.dummies, newdata = test.full))
-      
       feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-
+    print(3)
+    if (with_dummyvars) {
+      train.dummies = dummyVars( ~ ., data = train.full)
+      new.vars = data.frame(predict(train.dummies, newdata = train.full))
+      train.full = new.vars#cbind(train.full[, -which(names(train.full) %in% names(new.vars))], new.vars)
+      #       train.full[[id_name]] = id_col
+      #       train.full[[target_name]] = target_col
+      
+      test.dummies = dummyVars( ~ ., data = test.full)
+      new.vars = data.frame(predict(test.dummies, newdata = test.full))
+      test.full = new.vars#cbind(test.full[, -which(names(test.full) %in% names(new.vars))], new.vars)
+      
+      feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
+      gc()
+    }
+    print(4)
     if (with_date_dummies) {
       train.dummies = dummyVars( ~ factor(Original_Quote_Date_mon) + 
                                    factor(Original_Quote_Date_wday) +
                                    factor(Original_Quote_Date_mday) +
                                    factor(Original_Quote_Date_year) +
-                                   factor(Original_Quote_Date_wday) +
+                                   factor(Original_Quote_Date_week) +
                                    factor(Original_Quote_Date_quarters)
-                                   , data = train.full)
+                                 , data = train.full)
       train.full = cbind(train.full, data.frame(predict(train.dummies, newdata = train.full)))
       # train.full[[id_name]] = id_col
       # train.full[[target_name]] = target_col
@@ -357,7 +392,7 @@ for(with_value_counts in c(0))
                                   factor(Original_Quote_Date_wday) +
                                   factor(Original_Quote_Date_mday) +
                                   factor(Original_Quote_Date_year) +
-                                  factor(Original_Quote_Date_wday) +
+                                  factor(Original_Quote_Date_week) +
                                   factor(Original_Quote_Date_quarters), data = test.full)
       test.full = cbind(test.full, data.frame(predict(test.dummies, newdata = test.full)))
       
@@ -365,26 +400,26 @@ for(with_value_counts in c(0))
       for(col in setdiff(feature.names, names(test.full)))
         test.full[[col]] = 0
     }
-    
+    print(5)
     if (with_date_split) {
-        date_feature = "Original_Quote_Date_days_since_origin"
-        if (date_feature != "") {
-          from = min(train.full[[date_feature]])
-          to = max(train.full[[date_feature]])
-          for (ds in seq(from, to, 3)) {
-            new_feature = paste0(date_feature, "_", ds)
-            train.full[[new_feature]] = ifelse(train.full[[date_feature]] > ds, 1, 0)
-          }
-          from = min(test.full[[date_feature]])
-          to = max(test.full[[date_feature]])
-          for (ds in seq(from, to, 3)) {
-            new_feature = paste0(date_feature, "_", ds)
-            test.full[[new_feature]] = ifelse(test.full[[date_feature]] > ds, 1, 0)
-          }
+      date_feature = "Original_Quote_Date_days_since_origin"
+      if (date_feature != "") {
+        from = min(train.full[[date_feature]])
+        to = max(train.full[[date_feature]])
+        for (ds in seq(from, to, 3)) {
+          new_feature = paste0(date_feature, "_", ds)
+          train.full[[new_feature]] = ifelse(train.full[[date_feature]] > ds, 1, 0)
         }
-        feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
+        from = min(test.full[[date_feature]])
+        to = max(test.full[[date_feature]])
+        for (ds in seq(from, to, 3)) {
+          new_feature = paste0(date_feature, "_", ds)
+          test.full[[new_feature]] = ifelse(test.full[[date_feature]] > ds, 1, 0)
+        }
+      }
+      feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-    
+    print(6)
     for (f in feature.names) {
       if (class(train.full[[f]])=="character") {
         levels <- unique(c(train.full[[f]], test.full[[f]]))
@@ -392,15 +427,26 @@ for(with_value_counts in c(0))
         test.full[[f]]  <- as.integer(factor(test.full[[f]],  levels=levels))
       }
     }
-    
+    print(6.5)
+    if (with_corr_features) {
+      corr_features = cor(train.full[, intersect(names(train.full), original_feature.names)])
+      corr_features[lower.tri(corr_features, diag = T)] = NA
+      corr_features = as.data.frame(as.table(corr_features))
+      corr_features = na.omit(corr_features)
+      corr_features_sorted = corr_features[order(abs(corr_features$Freq), decreasing = T), ]
+      corr_features_sorted = corr_features_sorted[abs(corr_features$Freq) > 0.5, ]
+      corr_features_sorted = corr_features_sorted[1:corr_features_count, ]
+    }
+    print(7)
     if (with_value_counts) {
       for (f in feature.names) {
         ftab = table(c(train.full[[f]], test.full[[f]]))
         train.full[[paste0(f, "_count")]] = ftab[as.character(train.full[[f]])]
         test.full[[paste0(f, "_count")]] = ftab[as.character(test.full[[f]])]
       }
+      feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-    
+    print(8)
     if (with_cat_target) {
       for (f in categ) {
         vals = unique(train.full[[f]])
@@ -416,7 +462,7 @@ for(with_value_counts in c(0))
       }
       feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-    
+    print(9)
     if (with_csbc) {
       all_data = rbind(train.full[, feature.names], test.full[, feature.names])
       pp_vals = preProcess(all_data, method = c("center", "scale", "BoxCox"))
@@ -434,7 +480,7 @@ for(with_value_counts in c(0))
       train.full[[target_name]] = target_col
       test.full[[id_name]] = id_col_test
     }
-    
+    print(10)
     if (with_logs_sqrts_imp) {
       to_log = c("SalesField5", "PersonalField12", "PersonalField13")
       to_sqrt = c("PropertyField29", "PersonalField1", "PersonalField2", "SalesField5")
@@ -446,8 +492,9 @@ for(with_value_counts in c(0))
         train.full[[paste0("sqrt_", f)]] = sqrt(train.full[[f]])
         test.full[[paste0("sqrt_", f)]] = sqrt(test.full[[f]])
       }
+      feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-    
+    print(11)
     if (with_lindep) {
       train_without_target = train.full[, feature.names]
       comboInfo = findLinearCombos(train_without_target)
@@ -460,133 +507,221 @@ for(with_value_counts in c(0))
       test.full = test.full[, !(names(test.full) %in% to_remove)]
       feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
     }
-    
+    print(12)
     if (length(train_with_features) > 0) {
       train_with_features = c(train_with_features, setdiff(feature.names, imp$Feature))
       train.full = train.full[, c(id_name, target_name, train_with_features)]
       test.full = test.full[, c(id_name, train_with_features)]
     }
-    
+    print(13)
+    for (corr_ind in seq(1, corr_iterations))
+    if (with_most_corr_target) {
+      cat("corr_ind", corr_ind, "\n")
+      corr_target = cor(train.full[, feature.names], train.full$QuoteConversion_Flag)
+      sorted_corr = corr_target[order(abs(corr_target), decreasing = T), ]
+      highest_corr_features = names(sorted_corr[abs(sorted_corr) >= highest_corr_threshold])
+      highest_corr_features = highest_corr_features[1:40]
+      highest_corr_features = highest_corr_features[!is.na(highest_corr_features)]
+      
+      inv = highest_corr_features[sapply(highest_corr_features, function(f) !(0 %in% unique(train.full[[f]])))]
+      sub = expand.grid(highest_corr_features, highest_corr_features)
+      sub = sub[as.character(sub$Var1) != as.character(sub$Var2), ]
+      div = expand.grid(highest_corr_features, inv)
+      div = div[as.character(div$Var1) != as.character(div$Var2), ]
+      add_mult = expand.grid(highest_corr_features, highest_corr_features)
+      add_mult = add_mult[as.character(add_mult$Var1) < as.character(add_mult$Var2), ]
+      
+      sub = to_char(sub)
+      div = to_char(div)
+      add_mult = to_char(add_mult)
+      
+      inv_df = 1 / train.full[, inv]
+      train.full = create_features(train.full, inv_df, paste0("1/", inv))
+      inv_df = 1 / test.full[, inv]
+      test.full = create_features(test.full, inv_df, paste0("1/", inv))
+      
+      sub_df = train.full[, sub$Var1] - train.full[, sub$Var2]
+      train.full = create_features(train.full, sub_df, paste0(sub$Var1, "-", sub$Var2))
+      sub_df = test.full[, sub$Var1] - test.full[, sub$Var2]
+      test.full = create_features(test.full, sub_df, paste0(sub$Var1, "-", sub$Var2))
+      
+      div_df = train.full[, div$Var1] / train.full[, div$Var2]
+      train.full = create_features(train.full, div_df, paste0(div$Var1, "/", div$Var2))
+      div_df = test.full[, div$Var1] / test.full[, div$Var2]
+      test.full = create_features(test.full, div_df, paste0(div$Var1, "/", div$Var2))
+      
+      mult_df = train.full[, add_mult$Var1] * train.full[, add_mult$Var2]
+      train.full = create_features(train.full, mult_df, paste0(add_mult$Var1, "*", add_mult$Var2))
+      mult_df = test.full[, add_mult$Var1] * test.full[, add_mult$Var2]
+      test.full = create_features(test.full, mult_df, paste0(add_mult$Var1, "*", add_mult$Var2))
+      
+      add_df = train.full[, add_mult$Var1] + train.full[, add_mult$Var2]
+      train.full = create_features(train.full, add_df, paste0(add_mult$Var1, "+", add_mult$Var2))
+      add_df = test.full[, add_mult$Var1] + test.full[, add_mult$Var2]
+      test.full = create_features(test.full, add_df, paste0(add_mult$Var1, "+", add_mult$Var2))
+      
+      comb_feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
+      
+      corr_target = cor(train.full[, comb_feature.names], train.full$QuoteConversion_Flag)
+      sorted_corr = corr_target[order(abs(corr_target), decreasing = T), ]
+      highest_corr_features = names(sorted_corr[abs(sorted_corr) >= final_corr_threshold])
+      if (corr_ind > 1)
+        highest_corr_features = highest_corr_features[1:100]
+      highest_corr_features = highest_corr_features[!is.na(highest_corr_features)]
+      
+      gc()
+      rm("inv", "inv_df", "sub", "sub_df", "div", "div_df", "add_mult", "mult_df", "add_df", 
+         "corr_target", "sorted_corr")
+      gc()
+      
+      train.full = train.full[, (names(train.full) %in% c(feature.names, highest_corr_features, target_name, id_name))]
+      test.full = test.full[, (names(test.full) %in% c(feature.names, highest_corr_features, target_name, id_name))]
+      feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
+    }
+    print(13.5)
+    if (with_corr_features) {
+      fs = to_char(corr_features_sorted[c("Var1", "Var2")])
+      fs_df = train.full[, fs$Var1] - train.full[, fs$Var2]
+      train.full = create_features(train.full, fs_df, paste0(fs$Var1, "-", fs$Var2))
+      fs_df = test.full[, fs$Var1] - test.full[, fs$Var2]
+      test.full = create_features(test.full, fs_df, paste0(fs$Var1, "-", fs$Var2))
+    }
+    print(14)
+    if (with_golden_features) {
+      golden_features = list(c("CoverageField1B","PropertyField21B"),
+                             c("GeographicField6A","GeographicField8A"),
+                             c("GeographicField6A","GeographicField13A"),
+                             c("GeographicField8A","GeographicField13A"),
+                             c("GeographicField11A","GeographicField13A"),
+                             c("GeographicField8A","GeographicField11A"))
+      for(fs in golden_features) {
+        if (is.null(train.full[[paste0(fs[1], "-", fs[2])]])) {
+          train.full[[paste0(fs[1], "-", fs[2])]] = train.full[[fs[1]]] - train.full[[fs[2]]]
+          test.full[[paste0(fs[1], "-", fs[2])]] = test.full[[fs[1]]] - test.full[[fs[2]]]
+        }
+      }
+      feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
+    }
+    print(15)
     feature.names = names(train.full[, -which(names(train.full) %in% c(target_name, id_name))])
-    cat(feature.names, "\n")
-    saveRDS(train.full, paste0("input/train_pp_", exp_suffix, ".rds"))
-    saveRDS(test.full, paste0("input/test_pp_", exp_suffix, ".rds"))
-    
+    if (save_data) {
+      saveRDS(train.full, paste0("input/train_pp_", exp_suffix, ".rds"))
+      saveRDS(test.full, paste0("input/test_pp_", exp_suffix, ".rds"))
+    }
+    cat(feature.names, "\n", length(feature.names), "\n")
+    exp_suffix = paste0(exp_suffix, "_", length(feature.names))
     # cat("finished preprocessing\n")
   }
+  gc()
   if (stop_before_cv_train)
     break
-#### prepare for training ####
+  #### prepare for training ####
   
-  gc()
-  set.seed(9)
+  apply(search_grid, 1, function(param_set) {
   
-  if (full_data) {
-    train.split = split.df(train.full, train.rows.percent)
-    train.t = train.split$part1
-    train.v = train.split$part2
-    train.on.both = train.full
-    train.on.v = train.v
-    train.on.t = train.t
-  } else {
-    train.mini = split.df(train.full, 0.1)$part1
-    train.mini.split = split.df(train.mini, train.rows.percent)
-    train.mini.t = train.mini.split$part1
-    train.mini.v = train.mini.split$part2
-    train.on.both = train.mini
-    train.on.v = train.mini.v
-    train.on.t = train.mini.t
-  }
-  
-#### set params ####
-  param = list(   objective           = "binary:logistic", 
-                  booster             = "gbtree",
-                  eval_metric         = eval_metric,
-                  max_depth           = param_bests$max_depth,
-                  eta                 = param_bests$eta,
-                  subsample           = param_bests$subsample,
-                  colsample_bytree    = param_bests$colsample_bytree
-                  # num_parallel_tree   = 2,
-                  # alpha               = 0.0001,
-                  # lambda              = 1
-  )
-  h = sample(nrow(train.on.both), 2000)
-  dval = xgb.DMatrix(data=data.matrix(train.on.both[h, feature.names]),label=train.on.both[h, ]$QuoteConversion_Flag)
-  if (train_with_all)
-    dtrain = xgb.DMatrix(data=data.matrix(train.on.both[, feature.names]),label=train.on.both$QuoteConversion_Flag)
-  else
-    dtrain = xgb.DMatrix(data=data.matrix(train.on.t[, feature.names]),label=train.on.t$QuoteConversion_Flag)
-  exp_name = paste(sep = "_", param$eval_metric, nrow(dtrain), nrounds,
-                   param$max_depth, param$eta, param$subsample, param$colsample_bytree, 
-                   exp_suffix)
-  
-  watchlist = list()
-  if (nrow(dval) > 0)
-    watchlist$val = dval
-  watchlist$train = dtrain
-  # early = round(nrounds / 10)
-  
-  
-#### Cross Validation ####
-  
-  if (run_cv) {
+    set.seed(9)
     
-    time_before_cv = Sys.time()
-    nrow(dtrain)
+    if (full_data) {
+      train.split = split.df(train.full, train.rows.percent)
+      train.t = train.split$part1
+      train.v = train.split$part2
+      train.on.v = train.v
+      train.on.t = train.t
+      train.on.both = train.full
+    } else {
+      train.mini = split.df(train.full, 0.3)$part1
+      train.mini.split = split.df(train.mini, train.rows.percent)
+      train.mini.t = train.mini.split$part1
+      train.mini.v = train.mini.split$part2
+      train.on.both = train.mini
+      train.on.v = train.mini.v
+      train.on.t = train.mini.t
+    }
     
-    gc()
-    set.seed(110389)
-    
-    cv.res = xgb.cv(data = dtrain,
-                    objective = "binary:logistic",
-                    eval_metric = "auc",
-                    nrounds = nrounds,
-                    nfold = 3,
-                    max_depth           = param_bests$max_depth,
+    #### set params ####
+    param = list(   objective           = "binary:logistic", 
+                    booster             = "gbtree",
+                    eval_metric         = eval_metric,
+                    max_depth           = param_set[['max_depth']],
                     eta                 = param_bests$eta,
-                    subsample           = param_bests$subsample,
-                    colsample_bytree    = param_bests$colsample_bytree,
-                    verbose = 1,
-                    print.every.n = 100
+                    subsample           = param_set[['subsample']],
+                    colsample_bytree    = param_set[['colsample_bytree']]
+                    # num_parallel_tree   = 2,
+                    # alpha               = 0.0001,
+                    # lambda              = 1
     )
-    #   save(cv.res, file = paste(exp_name, "cv", 
-    #                             paste(cv.res[nrow(cv.res)]$test.auc.mean, cv.res[nrow(cv.res)]$test.auc.std, sep = "+"),
-    #                             sep = "_"))
-    
-    #   if (best_cv_score < cv.res[nrow(cv.res)]$test.auc.mean) {
-    #     best_cv_score = cv.res[nrow(cv.res)]$test.auc.mean
-    #     best_threshold = neg_count
-    #   }
-    #   thresholds_list[[neg_count]] = cv.res
-    if (F) {
-      best_so_far = cv.res$test.auc.mean
-      save(best_so_far, file = "best_so_far")
+    h = sample(nrow(train.on.both), 20000)
+    if (train_with_all) {
+      dval = xgb.DMatrix(data=data.matrix(train.on.both[h, feature.names]),label=train.on.both[h, ]$QuoteConversion_Flag)
+      dtrain = xgb.DMatrix(data=data.matrix(train.on.both[, feature.names]),label=train.on.both$QuoteConversion_Flag)
+    } else {
+      dval = xgb.DMatrix(data=data.matrix(train.on.v[, feature.names]),label=train.on.v$QuoteConversion_Flag)
+      dtrain = xgb.DMatrix(data=data.matrix(train.on.t[, feature.names]),label=train.on.t$QuoteConversion_Flag)
     }
+    exp_name = paste(sep = "_", param$eval_metric, nrow(dtrain), nrounds,
+                     param$max_depth, param$eta, param$subsample, param$colsample_bytree,
+                     exp_suffix)
     
-    cv_score = cv.res[nrow(cv.res)]$test.auc.mean
-    cat(exp_name, "\nCV score:", cv_score, "\n")
-    write(cv_score, paste0("cv_scores/", exp_name, "_", cv_score, ".txt"))
+    watchlist = list()
+    if (nrow(dval) > 0)
+      watchlist$val = dval
+    watchlist$train = dtrain
+    early = nrounds
     
-    if (file.exists("best_so_far")) {
-      load(file = "best_so_far")
-      if (length(best_so_far) == length(cv.res$test.auc.mean)) {
-        compare_cv = data.frame(best = best_so_far, test = cv.res$test.auc.mean)
-        plot = ggplot(compare_cv %>% gather(key, value, best, test)) + 
-          geom_line(aes(x = c(seq(1, nrounds), seq(1, nrounds)), y = value, fill = key, color = key))
-        # coord_cartesian(ylim = c(0.95, 0.957))
-        print(plot)
+    #### Cross Validation ####
+    
+    if (run_cv) {
+      
+      time_before_cv = Sys.time()
+      nrow(dtrain)
+      
+      gc()
+      set.seed(110389)
+      
+      cv.res = xgb.cv(data = dtrain,
+                      objective = "binary:logistic",
+                      eval_metric = "auc",
+                      nrounds = nrounds,
+                      nfold = 3,
+                      max_depth           = param$max_depth,
+                      eta                 = param$eta,
+                      subsample           = param$subsample,
+                      colsample_bytree    = param$colsample_bytree,
+                      verbose = 1,
+                      print.every.n = 1
+      )
+      #   save(cv.res, file = paste(exp_name, "cv", 
+      #                             paste(cv.res[nrow(cv.res)]$test.auc.mean, cv.res[nrow(cv.res)]$test.auc.std, sep = "+"),
+      #                             sep = "_"))
+      
+      #   if (best_cv_score < cv.res[nrow(cv.res)]$test.auc.mean) {
+      #     best_cv_score = cv.res[nrow(cv.res)]$test.auc.mean
+      #     best_threshold = neg_count
+      #   }
+      #   thresholds_list[[neg_count]] = cv.res
+      if (F) {
+        best_so_far = cv.res$test.auc.mean
+        save(best_so_far, file = "best_so_far")
       }
+      
+      cv_score = cv.res[nrow(cv.res)]$test.auc.mean
+      cat(exp_name, "\nCV score:", cv_score, "\n")
+      write(cv_score, paste0("cv_scores/", exp_name, "_", cv_score, ".txt"))
+      
+      if (F & file.exists("best_so_far")) {
+        load(file = "best_so_far")
+        if (length(best_so_far) == length(cv.res$test.auc.mean)) {
+          compare_cv = data.frame(best = best_so_far, test = cv.res$test.auc.mean)
+          plot = ggplot(compare_cv %>% gather(key, value, best, test)) + 
+            geom_line(aes(x = c(seq(1, nrounds), seq(1, nrounds)), y = value, fill = key, color = key))
+          # coord_cartesian(ylim = c(0.95, 0.957))
+          print(plot)
+        }
+      }
+      # cat("Time:", Sys.time() - time_before_cv, "\n")
+      
     }
-    # cat("Time:", Sys.time() - time_before_cv, "\n")
-    
-  }
-  # }
-  
-#### Train the model ####
-  if (run_train) {
-    time_before_training = Sys.time()
-    gc()
-    set.seed(110389)
+    # }
     
     model = xgb.train(  params              = param, 
                         data                = dtrain, 
